@@ -1,0 +1,12 @@
+[Unit]
+Description=WiFi Experience Index connected-performance scorer daemon
+After=onewifi.service
+Requires=onewifi.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/wei
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
