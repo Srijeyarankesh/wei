@@ -17,6 +17,7 @@
  */
 
 #include "weid_rfc.h"
+#include "wei_util.h"
 
 #include <cjson/cJSON.h>
 
@@ -70,11 +71,17 @@ void weid_rfc_load(void)
     g_weid_rfc.connperf_enabled = false;
 
     if (weid_rfc_read_file(buf, sizeof(buf)) == 0) {
+        wei_util_info_print(WEI_CONNECTED,
+            "%s:%d RFC file %s absent/empty -> connperf DISABLED (default)\n",
+            __func__, __LINE__, WEID_RFC_NVRAM_PATH);
         return;
     }
 
     doc = cJSON_Parse(buf);
     if (doc == NULL) {
+        wei_util_error_print(WEI_CONNECTED,
+            "%s:%d RFC file %s is malformed JSON -> connperf DISABLED\n",
+            __func__, __LINE__, WEID_RFC_NVRAM_PATH);
         return;
     }
 
@@ -83,6 +90,10 @@ void weid_rfc_load(void)
     if (cJSON_IsBool(flag)) {
         g_weid_rfc.connperf_enabled = cJSON_IsTrue(flag) ? true : false;
     }
+    wei_util_info_print(WEI_CONNECTED,
+        "%s:%d RFC loaded from %s: %s.%s=%s\n",
+        __func__, __LINE__, WEID_RFC_NVRAM_PATH, WEID_RFC_OBJECT, WEID_RFC_CONNPERF,
+        g_weid_rfc.connperf_enabled ? "true" : "false");
 
     cJSON_Delete(doc);
 }

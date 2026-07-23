@@ -20,6 +20,7 @@
 #include "wei_perfreport.h"
 #include "bus.h"
 #include "weid_rfc.h"
+#include "wei_util.h"
 
 #include <cjson/cJSON.h>
 
@@ -223,15 +224,33 @@ static bool wei_perfreport_should_emit(wei_perfreport_client_state_t *state,
     }
 
     if (!weid_rfc_connperf_enabled()) {
+        wei_util_dbg_print(WEI_CONNECTED,
+            "%s:%d [EMIT-GATE] suppress: pillar disabled (/nvram/wei.json RFC.WhenConnected=false)\n",
+            __func__, __LINE__);
         return false;
     }
 
     if (state->warmup_ticks_seen < WEI_PERFREPORT_WARMUP_INTERVALS) {
         state->warmup_ticks_seen++;
+        wei_util_dbg_print(WEI_CONNECTED,
+            "%s:%d [EMIT-GATE] suppress: warm-up %u/%u\n",
+            __func__, __LINE__, (unsigned)state->warmup_ticks_seen,
+            (unsigned)WEI_PERFREPORT_WARMUP_INTERVALS);
         return false;
     }
 
-    return current_class != state->last_emitted_class;
+    if (current_class == state->last_emitted_class) {
+        wei_util_dbg_print(WEI_CONNECTED,
+            "%s:%d [EMIT-GATE] suppress: no verdict change (class=%s)\n",
+            __func__, __LINE__, wei_perfreport_verdict_name(current_class));
+        return false;
+    }
+
+    wei_util_info_print(WEI_CONNECTED,
+        "%s:%d [EMIT-GATE] EMIT: verdict change %s -> %s\n",
+        __func__, __LINE__, wei_perfreport_verdict_name(state->last_emitted_class),
+        wei_perfreport_verdict_name(current_class));
+    return true;
 }
 
 /* Per-interval publish for one scored client: on gate admission it marshals the
@@ -256,8 +275,17 @@ bus_error_t wei_perfreport_publish_tick(const uint8_t client_mac[6],
         return bus_error_invalid_input;
     }
 
+    wei_util_dbg_print(WEI_CONNECTED,
+        "%s:%d [SCORE] mac=%02x:%02x:%02x:%02x:%02x:%02x score=%u verdict=%s dominant=%s\n",
+        __func__, __LINE__, client_mac[0], client_mac[1], client_mac[2],
+        client_mac[3], client_mac[4], client_mac[5], (unsigned)result->score,
+        wei_perfreport_verdict_name(result->verdict),
+        wei_perfreport_contributor_name(result->dominant));
+
     state = wei_perfreport_state_find_or_add(client_mac);
     if (state == NULL) {
+        wei_util_error_print(WEI_CONNECTED,
+            "%s:%d [CONNPERF-PUB] per-client state table full; skipping\n", __func__, __LINE__);
         return bus_error_success;
     }
 
@@ -268,11 +296,16 @@ bus_error_t wei_perfreport_publish_tick(const uint8_t client_mac[6],
     ctrl = weid_bus_handle();
     desc = get_bus_descriptor();
     if (ctrl == NULL || desc == NULL || desc->bus_event_publish_fn == NULL) {
+        wei_util_error_print(WEI_CONNECTED,
+            "%s:%d [CONNPERF-PUB] bus not ready (ctrl=%p desc=%p) -- cannot publish\n",
+            __func__, __LINE__, (void *)ctrl, (void *)desc);
         return bus_error_general;
     }
 
     json = wei_perfreport_build_json(client_mac, result, metrics);
     if (json == NULL) {
+        wei_util_error_print(WEI_CONNECTED,
+            "%s:%d [CONNPERF-PUB] JSON build failed\n", __func__, __LINE__);
         return bus_error_general;
     }
 
@@ -283,8 +316,15 @@ bus_error_t wei_perfreport_publish_tick(const uint8_t client_mac[6],
 
     rc = desc->bus_event_publish_fn(ctrl, WEI_CONNPERF_DM_REPORT_EVENT, &data);
     if (rc != bus_error_success) {
+        wei_util_error_print(WEI_CONNECTED,
+            "%s:%d [CONNPERF-PUB] publish FAILED rc=%d event=%s\n",
+            __func__, __LINE__, rc, WEI_CONNPERF_DM_REPORT_EVENT);
         return rc;
     }
+
+    wei_util_info_print(WEI_CONNECTED,
+        "%s:%d [CONNPERF-PUB] published event=%s bytes=%u json=%s\n",
+        __func__, __LINE__, WEI_CONNPERF_DM_REPORT_EVENT, data.raw_data_len, json);
 
     state->last_emitted_class = result->verdict;
     return bus_error_success;

@@ -46,6 +46,7 @@ extern "C" {
  * misread as a handled one; the daemon acts only on PERIODIC_STATS, DISCONNECT,
  * RAPID_DISCONNECT, REGISTER_STA and UNREGISTER_STA:
  *   LQ_STATS_SOCKET_PATH         "/tmp/linkquality_stats.sock"
+ *   LQ_IPC_WIRE_VERSION          1
  *   LQ_IPC_MSG_PERIODIC_STATS    1
  *   LQ_IPC_MSG_DISCONNECT        2
  *   LQ_IPC_MSG_RAPID_DISCONNECT  3
@@ -61,6 +62,11 @@ extern "C" {
 
 #define LQ_STATS_SOCKET_PATH "/tmp/linkquality_stats.sock"
 
+/* Wire-format version. MUST equal OneWifi lq_ipc_sender.h's LQ_IPC_WIRE_VERSION.
+ * Bump on any change to the TLV framing or on-wire payload meaning; the receiver
+ * rejects a datagram whose version it does not recognise. */
+#define LQ_IPC_WIRE_VERSION 1u
+
 enum {
     LQ_IPC_MSG_PERIODIC_STATS   = 1,
     LQ_IPC_MSG_DISCONNECT       = 2,
@@ -75,29 +81,33 @@ enum {
     LQ_IPC_MSG_SET_SCORE_PARAMS = 11
 };
 
-/* One datagram is one TLV: a one-byte type, a two-byte value length, then the
- * packed payload. Packed so value begins at byte 3 with no alignment padding,
- * matching the sender's framing exactly. */
+/* One datagram is one versioned TLV: a one-byte type, a one-byte wire version, a
+ * two-byte element size, a two-byte value length, then the packed payload. Packed
+ * so value begins at byte 6 with no alignment padding, matching the sender's
+ * framing exactly. elem_size carries the sender's sizeof(stats_arg_t) so a struct
+ * drift between the two builds is rejected rather than misparsed. */
 typedef struct {
     uint8_t  type;
+    uint8_t  version;
+    uint16_t elem_size;
     uint16_t len;
     uint8_t  value[];
 } __attribute__((packed)) weid_tlv_t;
 
 /* Compile-time parity guard (Q5). The daemon carries its own copy of the sender's
  * TLV framing, so a mismatch is silent on the wire -- pin it to a build break
- * instead: value[] must start at byte 3 (1-byte type + 2-byte len, no padding),
- * and the 6-byte MAC the parser lifts from the staged stats_arg_t and keys the
- * engine on must not change width. sizeof(stats_arg_t) is deliberately not pinned
- * -- it is the shared staged struct (parity by construction), and its trailing
- * unsigned-long counters make its total size differ between the host static check
- * and the armv7 target. */
-_Static_assert(offsetof(weid_tlv_t, value) == 3,
-               "weid_tlv_t must frame value[] at byte 3 to match the linkquality sender");
-_Static_assert(sizeof(weid_tlv_t) == 3,
-               "weid_tlv_t header must be packed to 3 bytes with no padding");
+ * instead: value[] must start at byte 6 (1-byte type + 1-byte version + 2-byte
+ * elem_size + 2-byte len, no padding), and the 6-byte MAC the parser lifts from
+ * the staged stats_arg_t and keys the engine on must not change width.
+ * sizeof(stats_arg_t) is deliberately not pinned here -- it is the shared staged
+ * struct (parity by construction) and is instead checked at runtime against the
+ * sender's elem_size field. */
+_Static_assert(offsetof(weid_tlv_t, value) == 6,
+               "weid_tlv_t must frame value[] at byte 6 to match the linkquality sender");
+_Static_assert(sizeof(weid_tlv_t) == 6,
+               "weid_tlv_t header must be packed to 6 bytes with no padding");
 _Static_assert(sizeof(((stats_arg_t *)0)->dev.cli_MACAddress) == 6,
-               "stats_arg_t MAC key must stay 6 bytes (run_qmgr.h:55)");
+               "stats_arg_t MAC key must stay 6 bytes");
 
 #ifdef __cplusplus
 }

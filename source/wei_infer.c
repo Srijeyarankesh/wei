@@ -18,6 +18,7 @@
 
 #include "wei_infer.h"
 #include "wei_perfreport.h"
+#include "wei_util.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -67,6 +68,11 @@ static void wei_infer_map_reap(wei_infer_engine_t *eng, int64_t now_ms)
         wei_infer_slot_t *slot = &eng->map.slots[i];
 
         if (slot->in_use && now_ms - slot->last_seen > WEI_TRACK_ABSENCE_DEFAULT_MS) {
+            wei_util_info_print(WEI_CONNECTED,
+                "%s:%d [REAP] mac=%02x:%02x:%02x:%02x:%02x:%02x absent %lldms -> slot %u freed\n",
+                __func__, __LINE__, slot->mac[0], slot->mac[1], slot->mac[2],
+                slot->mac[3], slot->mac[4], slot->mac[5],
+                (long long)(now_ms - slot->last_seen), i);
             memset(slot, 0, sizeof(*slot));
             memset(&eng->ledger[i], 0, sizeof(eng->ledger[i]));
             if (eng->map.count > 0) {
@@ -139,7 +145,14 @@ static int32_t wei_infer_phy_instability(const wei_infer_client_t *st)
 
         accum += d * d;
     }
-    return (int32_t)(accum / (double)st->phy_fill / 1.0e6);
+    {
+        int32_t instab = (int32_t)(accum / (double)st->phy_fill / 1.0e6);
+        wei_util_dbg_print(WEI_CONNECTED,
+            "%s:%d [TP-3 instability] phy_fill=%u mean=%.0f var=%.0f -> instab=%d (Mbps^2)\n",
+            __func__, __LINE__, (unsigned)st->phy_fill, mean,
+            accum / (double)st->phy_fill, instab);
+        return instab;
+    }
 }
 
 /* Widens the client's running observed [lo,hi] domain to include v, seeding it on
@@ -151,6 +164,8 @@ static void wei_infer_band_widen(wei_infer_band_t *b, double v)
         b->lo = v;
         b->hi = v;
         b->primed = 1;
+        wei_util_dbg_print(WEI_CONNECTED, "%s:%d [BAND] prime v=%.2f -> [%.2f,%.2f]\n",
+            __func__, __LINE__, v, b->lo, b->hi);
         return;
     }
     if (v < b->lo) {
@@ -159,6 +174,8 @@ static void wei_infer_band_widen(wei_infer_band_t *b, double v)
     if (v > b->hi) {
         b->hi = v;
     }
+    wei_util_dbg_print(WEI_CONNECTED, "%s:%d [BAND] v=%.2f -> [%.2f,%.2f]\n",
+        __func__, __LINE__, v, b->lo, b->hi);
 }
 
 /* Scores one client for this tick: gates on the read-only C1 activity/status,
@@ -179,10 +196,14 @@ static int wei_infer_score_client(wei_infer_client_t *st,
     double reduced;
     double weighted;
     double score;
+    double raw_score;
     int warming;
 
     if (rec->activity_state != WEI_CONN_METRIC_STATE_ACTIVE ||
         rec->status != WEI_CONN_METRIC_STATUS_OK) {
+        wei_util_dbg_print(WEI_CONNECTED,
+            "%s:%d [SCORE-CLIENT] gated: active=%d status=%d -> no score this tick\n",
+            __func__, __LINE__, (int)rec->activity_state, (int)rec->status);
         return 0;
     }
 
@@ -207,6 +228,7 @@ static int wei_infer_score_client(wei_infer_client_t *st,
     reduced  = cscore_rms_reduce(norm, WEI_INFER_METRIC_COUNT);
     weighted = cscore_chanutil_weight(reduced, (double)rec->chan_util_pct / 100.0);
     score    = cscore_standardize(weighted);
+    raw_score = score;
 
     if (warming) {
         st->reconnect_ramp = WEI_INFER_RECONNECT_RAMP;
@@ -221,6 +243,17 @@ static int wei_infer_score_client(wei_infer_client_t *st,
     out->verdict = WEI_INFER_VERDICT_SMOOTH;
     out->dominant = WEI_INFER_CONTRIB_NONE;
     out->video_degrade = 0;
+
+    wei_util_info_print(WEI_CONNECTED,
+        "%s:%d [SCORE-CLIENT] in{snr=%d phy_kbps=%u per=%u chan=%u} smoothed{phy=%.0f per=%.2f} "
+        "bands{snr[%.1f,%.1f] phy[%.0f,%.0f] per[%.2f,%.2f]} norm{%.3f %.3f %.3f} "
+        "reduced=%.4f weighted=%.4f raw=%.2f ramp_left=%u -> score=%u\n",
+        __func__, __LINE__, rec->link_snr_db, rec->phy_rate_kbps,
+        (unsigned)rec->pkt_err_rate, (unsigned)rec->chan_util_pct,
+        smoothed_phy, smoothed_per,
+        st->norm_band[0].lo, st->norm_band[0].hi, st->norm_band[1].lo, st->norm_band[1].hi,
+        st->norm_band[2].lo, st->norm_band[2].hi, norm[0], norm[1], norm[2],
+        reduced, weighted, raw_score, (unsigned)st->reconnect_ramp, (unsigned)out->score);
     return 1;
 }
 
@@ -239,6 +272,7 @@ static void wei_infer_flag_instability(wei_infer_engine_t *eng, wei_infer_slot_t
     wei_track_entry_t *entry;
     int32_t instability;
     int unstable;
+    int64_t exc_ms = 0;
 
     instability = wei_infer_phy_instability(&slot->state);
     unstable = instability > eng->policy.tput_var_band;
@@ -248,12 +282,18 @@ static void wei_infer_flag_instability(wei_infer_engine_t *eng, wei_infer_slot_t
         wei_track_tick(entry, -instability, now_ms, -eng->policy.tput_var_band,
                        eng->policy.tput_floor_ms);
         wei_track_collect(entry, &excursion);
-        unstable = unstable || excursion.duration_ms > 0;
+        exc_ms = excursion.duration_ms;
+        unstable = unstable || exc_ms > 0;
     }
 
     if (unstable) {
         out->verdict = WEI_INFER_VERDICT_DEGRADED;
     }
+
+    wei_util_dbg_print(WEI_CONNECTED,
+        "%s:%d [FLAG-instability] instab=%d band=%d excursion_ms=%lld -> %s\n",
+        __func__, __LINE__, instability, eng->policy.tput_var_band, (long long)exc_ms,
+        unstable ? "DEGRADED" : "ok");
 }
 
 /* Marks a latency-driven negative-experience period over the connected-P score
@@ -282,6 +322,12 @@ static void wei_infer_flag_latency_risk(wei_infer_engine_t *eng, wei_infer_clien
     if (st->alarm) {
         out->verdict = WEI_INFER_VERDICT_DEGRADED;
     }
+
+    wei_util_dbg_print(WEI_CONNECTED,
+        "%s:%d [FLAG-latency] score=%u band=%u cross=%u/%u alarm=%u -> %s\n",
+        __func__, __LINE__, (unsigned)out->score, (unsigned)eng->policy.latency_score_band,
+        (unsigned)st->threshold_cross, (unsigned)eng->policy.latency_sustain_ticks,
+        (unsigned)st->alarm, st->alarm ? "DEGRADED" : "ok");
 }
 
 /* Labels the client's result video-degraded when its connected-P score sits in the
@@ -297,6 +343,11 @@ static void wei_infer_flag_video_degrade(const wei_infer_policy_t *policy,
     if (out->score < policy->video_degrade_band) {
         out->video_degrade = 1;
     }
+
+    wei_util_dbg_print(WEI_CONNECTED,
+        "%s:%d [FLAG-video] score=%u band=%u -> video_degrade=%u\n",
+        __func__, __LINE__, (unsigned)out->score, (unsigned)policy->video_degrade_band,
+        (unsigned)out->video_degrade);
 }
 
 /* Attributes the dominant metric behind a throughput-degradation verdict (TP-4,
@@ -326,6 +377,11 @@ static wei_infer_contributor_t wei_infer_attribute(const wei_infer_client_t *st,
             worst = i;
         }
     }
+
+    wei_util_dbg_print(WEI_CONNECTED,
+        "%s:%d [ATTRIBUTE] badness{snr=%.3f phy=%.3f per=%.3f chan=%.3f} -> dominant=%d\n",
+        __func__, __LINE__, badness[0], badness[1], badness[2], badness[3],
+        (int)(WEI_INFER_CONTRIB_SNR + worst));
     return (wei_infer_contributor_t)(WEI_INFER_CONTRIB_SNR + worst);
 }
 
@@ -362,6 +418,12 @@ static void wei_infer_ledger_update(wei_infer_episode_log_t *log,
     } else if (open) {
         log->ring[log->head].stop_ms = now_ms;
     }
+
+    wei_util_dbg_print(WEI_CONNECTED,
+        "%s:%d [LEDGER] verdict=%s was_open=%d -> episodes=%u fill=%u\n",
+        __func__, __LINE__,
+        verdict == WEI_INFER_VERDICT_DEGRADED ? "degraded" : "smooth",
+        open, log->episodes, (unsigned)log->fill);
 }
 
 /* Daemon per-tick entry, invoked once per poll interval after that interval's
@@ -381,6 +443,9 @@ void wei_infer_tick(wei_infer_engine_t *eng)
 
     now_ms = wei_infer_now_ms();
 
+    wei_util_dbg_print(WEI_CONNECTED, "%s:%d [SWEEP] scoring %u client(s) in map\n",
+        __func__, __LINE__, (unsigned)eng->map.count);
+
     for (i = 0; i < WEI_TRACK_MAX_CLIENTS; i++) {
         wei_infer_slot_t *slot = &eng->map.slots[i];
 
@@ -396,6 +461,13 @@ void wei_infer_tick(wei_infer_engine_t *eng)
                     wei_infer_attribute(&slot->state, &eng->snapshot[i]);
             }
             wei_infer_ledger_update(&eng->ledger[i], eng->result[i].verdict, now_ms);
+            wei_util_info_print(WEI_CONNECTED,
+                "%s:%d [SCORE] mac=%02x:%02x:%02x:%02x:%02x:%02x score=%u verdict=%s "
+                "dominant=%d video=%u\n",
+                __func__, __LINE__, slot->mac[0], slot->mac[1], slot->mac[2],
+                slot->mac[3], slot->mac[4], slot->mac[5], (unsigned)eng->result[i].score,
+                eng->result[i].verdict == WEI_INFER_VERDICT_DEGRADED ? "degraded" : "smooth",
+                (int)eng->result[i].dominant, (unsigned)eng->result[i].video_degrade);
             wei_perfreport_publish_tick(slot->mac, &eng->result[i], &eng->snapshot[i]);
         }
     }
@@ -420,6 +492,12 @@ wei_infer_engine_t *wei_infer_create(const wei_infer_policy_t *policy)
     wei_track_init(&eng->tracker);
     eng->policy = *policy;
 
+    wei_util_info_print(WEI_CONNECTED,
+        "%s:%d [ENGINE] created: policy{tput_var=%d tput_floor=%lldms lat_band=%u "
+        "lat_sustain=%u video_band=%u} capacity=%d\n",
+        __func__, __LINE__, eng->policy.tput_var_band, (long long)eng->policy.tput_floor_ms,
+        (unsigned)eng->policy.latency_score_band, (unsigned)eng->policy.latency_sustain_ticks,
+        (unsigned)eng->policy.video_degrade_band, WEI_TRACK_MAX_CLIENTS);
     return eng;
 }
 
@@ -447,6 +525,9 @@ void wei_infer_stage_record(wei_infer_engine_t *eng, const uint8_t mac[6],
             if (memcmp(slot->mac, mac, sizeof(slot->mac)) == 0) {
                 slot->last_seen = now_ms;
                 eng->snapshot[i] = *rec;
+                wei_util_dbg_print(WEI_CONNECTED,
+                    "%s:%d [STAGE] refresh mac=%02x:%02x:%02x:%02x:%02x:%02x slot=%u\n",
+                    __func__, __LINE__, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], i);
                 return;
             }
         } else if (free_slot < 0) {
@@ -455,6 +536,10 @@ void wei_infer_stage_record(wei_infer_engine_t *eng, const uint8_t mac[6],
     }
 
     if (free_slot < 0) {
+        wei_util_error_print(WEI_CONNECTED,
+            "%s:%d [STAGE] map FULL (%u) -> dropping mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
+            __func__, __LINE__, (unsigned)eng->map.count,
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
         return;
     }
 
@@ -466,6 +551,11 @@ void wei_infer_stage_record(wei_infer_engine_t *eng, const uint8_t mac[6],
     if (eng->map.count < WEI_TRACK_MAX_CLIENTS) {
         eng->map.count++;
     }
+
+    wei_util_info_print(WEI_CONNECTED,
+        "%s:%d [STAGE] admit mac=%02x:%02x:%02x:%02x:%02x:%02x slot=%d count=%u\n",
+        __func__, __LINE__, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+        free_slot, (unsigned)eng->map.count);
 }
 
 void wei_infer_destroy(wei_infer_engine_t *eng)

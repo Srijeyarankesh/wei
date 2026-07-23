@@ -18,6 +18,7 @@
 
 #include "wei_conn_scorer.h"
 #include "run_qmgr.h"
+#include "wei_util.h"
 
 #include <math.h>
 
@@ -32,16 +33,23 @@ double cscore_normalize_metric(double value, double lo, double hi)
     double unit;
 
     if (span <= 0.0) {
+        wei_util_dbg_print(WEI_CONNECTED,
+            "%s:%d [C5-norm] value=%.2f lo=%.2f hi=%.2f span<=0 -> 0.000\n",
+            __func__, __LINE__, value, lo, hi);
         return 0.0;
     }
 
     unit = (value - lo) / span;
     if (unit < 0.0) {
-        return 0.0;
+        unit = 0.0;
     }
     if (unit > 1.0) {
-        return 1.0;
+        unit = 1.0;
     }
+
+    wei_util_dbg_print(WEI_CONNECTED,
+        "%s:%d [C5-norm] value=%.2f lo=%.2f hi=%.2f -> %.3f\n",
+        __func__, __LINE__, value, lo, hi, unit);
     return unit;
 }
 
@@ -61,9 +69,18 @@ double cscore_rms_reduce(const double *metrics, size_t count)
 
     accum /= (double)count;
     if (accum < 0.0) {
+        wei_util_dbg_print(WEI_CONNECTED,
+            "%s:%d [C5-rms] count=%zu mean=%.4f (<0) -> 0.000\n",
+            __func__, __LINE__, count, accum);
         return 0.0;
     }
-    return sqrt(accum);
+    {
+        double rms = sqrt(accum);
+        wei_util_dbg_print(WEI_CONNECTED,
+            "%s:%d [C5-rms] count=%zu mean=%.4f -> rms=%.4f\n",
+            __func__, __LINE__, count, accum, rms);
+        return rms;
+    }
 }
 
 double cscore_chanutil_weight(double reduced, double chan_util)
@@ -78,8 +95,12 @@ double cscore_chanutil_weight(double reduced, double chan_util)
     }
 
     double weight = 1.0 / (1.0 + exp(exponent));
+    double result = reduced * weight;
 
-    return reduced * weight;
+    wei_util_dbg_print(WEI_CONNECTED,
+        "%s:%d [C5-chanutil] reduced=%.4f chan_util=%.3f exponent=%.3f weight=%.4f -> %.4f\n",
+        __func__, __LINE__, reduced, chan_util, exponent, weight, result);
+    return result;
 }
 
 double cscore_standardize(double weighted)
@@ -87,11 +108,15 @@ double cscore_standardize(double weighted)
     double scaled = CSCORE_SCALE_MIN + weighted * (CSCORE_SCALE_MAX - CSCORE_SCALE_MIN);
 
     if (scaled < CSCORE_SCALE_MIN) {
-        return CSCORE_SCALE_MIN;
+        scaled = CSCORE_SCALE_MIN;
     }
     if (scaled > CSCORE_SCALE_MAX) {
-        return CSCORE_SCALE_MAX;
+        scaled = CSCORE_SCALE_MAX;
     }
+
+    wei_util_dbg_print(WEI_CONNECTED,
+        "%s:%d [C5-standardize] weighted=%.4f -> %.2f\n",
+        __func__, __LINE__, weighted, scaled);
     return scaled;
 }
 
@@ -100,10 +125,14 @@ uint8_t wei_conn_scorer_score(const wei_conn_metric_record_t *record)
     double norm[3];
     double reduced;
     double weighted;
+    uint8_t out;
 
     if (record == NULL ||
         record->activity_state != WEI_CONN_METRIC_STATE_ACTIVE ||
         record->status != WEI_CONN_METRIC_STATUS_OK) {
+        wei_util_dbg_print(WEI_CONNECTED,
+            "%s:%d [C5-score] gated (record NULL / not active / not OK) -> 0\n",
+            __func__, __LINE__);
         return 0;
     }
 
@@ -114,6 +143,13 @@ uint8_t wei_conn_scorer_score(const wei_conn_metric_record_t *record)
 
     reduced  = cscore_rms_reduce(norm, 3);
     weighted = cscore_chanutil_weight(reduced, (double)record->chan_util_pct);
+    out = (uint8_t)lround(cscore_standardize(weighted));
 
-    return (uint8_t)lround(cscore_standardize(weighted));
+    wei_util_info_print(WEI_CONNECTED,
+        "%s:%d [C5-score] snr=%d phy_kbps=%u per=%u chan=%u | norm{%.3f %.3f %.3f} "
+        "reduced=%.4f weighted=%.4f -> score=%u\n",
+        __func__, __LINE__, record->link_snr_db, record->phy_rate_kbps,
+        (unsigned)record->pkt_err_rate, (unsigned)record->chan_util_pct,
+        norm[0], norm[1], norm[2], reduced, weighted, (unsigned)out);
+    return out;
 }

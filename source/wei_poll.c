@@ -17,6 +17,7 @@
  */
 
 #include "wei_poll.h"
+#include "wei_util.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -59,6 +60,14 @@ static int wei_sock_open(const char *sock_path)
         return -1;
     }
 
+    /* Match the OneWifi linkquality sender's 4 MB SO_SNDBUF so 50+ client
+     * bursts are queued in the socket rather than dropped by the kernel.
+     * Best-effort: ignore failure. */
+    {
+        int rcvbuf = 4 * 1024 * 1024;
+        (void)setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+    }
+
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
     strncpy(addr.sun_path, sock_path, sizeof(addr.sun_path) - 1);
@@ -86,6 +95,8 @@ static void wei_sock_drain(wei_poll_ctx_t *ctx)
             break;
         }
         if (len > 0 && ctx->on_datagram != NULL) {
+            wei_util_dbg_print(WEI_CONNECTED, "%s:%d [IPC-RECV] datagram=%zd bytes\n",
+                __func__, __LINE__, len);
             ctx->on_datagram(buf, (size_t)len, ctx->user);
         }
     }

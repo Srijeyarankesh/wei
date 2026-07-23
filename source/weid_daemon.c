@@ -19,10 +19,12 @@
 #include "weid_rfc.h"
 #include "weid_bus.h"
 #include "weid_wire.h"
+#include "wei_util.h"
 
 #include <malloc.h>
 #include <pthread.h>
 #include <signal.h>
+#include <unistd.h>
 
 /* Keep the daemon's small allocations off mmap and let the heap trim back down,
  * so steady-state RSS stays bounded on the gateway; ~64 KB per the real
@@ -59,30 +61,49 @@ int main(void)
     mallopt(M_MMAP_THRESHOLD, WEID_MALLOC_THRESHOLD);
     mallopt(M_TRIM_THRESHOLD, WEID_MALLOC_THRESHOLD);
 
+    wei_util_info_print(WEI_CONNECTED, "%s:%d ===== WEI daemon starting (pid=%d) =====\n",
+        __func__, __LINE__, (int)getpid());
+
     weid_rfc_load();
+    wei_util_info_print(WEI_CONNECTED, "%s:%d RFC: connperf(WhenConnected)=%s\n",
+        __func__, __LINE__, weid_rfc_connperf_enabled() ? "ENABLED" : "disabled");
 
     if (weid_bus_open() != bus_error_success) {
+        wei_util_error_print(WEI_CONNECTED, "%s:%d weid_bus_open FAILED -- aborting\n",
+            __func__, __LINE__);
         return 1;
     }
+    wei_util_info_print(WEI_CONNECTED, "%s:%d bus opened + data-model registered\n",
+        __func__, __LINE__);
 
     if (weid_wire_init(&ctx) != 0) {
+        wei_util_error_print(WEI_CONNECTED, "%s:%d weid_wire_init FAILED -- aborting\n",
+            __func__, __LINE__);
         weid_bus_close();
         return 1;
     }
 
     if (pthread_create(&body, NULL, weid_daemon_body, &ctx) != 0) {
+        wei_util_error_print(WEI_CONNECTED, "%s:%d pthread_create FAILED -- aborting\n",
+            __func__, __LINE__);
         weid_wire_deinit(&ctx);
         weid_bus_close();
         return 1;
     }
+    wei_util_info_print(WEI_CONNECTED, "%s:%d receive/tick thread started; awaiting signals\n",
+        __func__, __LINE__);
 
     sigwait(&set, &sig);
+    wei_util_info_print(WEI_CONNECTED, "%s:%d signal %d received; shutting down\n",
+        __func__, __LINE__, sig);
 
     pthread_cancel(body);
     pthread_join(body, NULL);
 
     weid_wire_deinit(&ctx);
     weid_bus_close();
+    wei_util_info_print(WEI_CONNECTED, "%s:%d ===== WEI daemon stopped =====\n",
+        __func__, __LINE__);
 
     return 0;
 }
