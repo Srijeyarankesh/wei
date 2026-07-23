@@ -22,6 +22,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -30,7 +31,14 @@
 #include <time.h>
 #include <unistd.h>
 
-#define WEI_DGRAM_MAX 2048
+/* A single datagram must hold the linkquality sender's largest legal frame.
+ * lq_ipc_sender.c build_tlv() prepends a fixed 6-byte header and caps the value
+ * at UINT16_MAX bytes, so header + UINT16_MAX is the most it can ever emit.
+ * Sizing the recv() buffer to that maximum makes per-datagram truncation
+ * impossible for any client count. The previous 2048 truncated even a single
+ * count=1 stats frame (6-byte header + sizeof(stats_arg_t)=3776 = 3782 bytes),
+ * which the receiver then rejected as "tlv.len != payload". */
+#define WEI_DGRAM_MAX (UINT16_MAX + 64u)
 
 struct wei_poll_ctx {
     int fd;
@@ -83,7 +91,10 @@ static int wei_sock_open(const char *sock_path)
 
 static void wei_sock_drain(wei_poll_ctx_t *ctx)
 {
-    uint8_t buf[WEI_DGRAM_MAX];
+    /* Drained only from the single poll thread, one datagram fully consumed per
+     * iteration, so a static buffer is safe and keeps this ~64 KiB frame off the
+     * stack. */
+    static uint8_t buf[WEI_DGRAM_MAX];
     ssize_t len;
 
     for (;;) {
