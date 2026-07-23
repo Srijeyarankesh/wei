@@ -89,17 +89,16 @@ static void weid_on_datagram(const uint8_t *buf, size_t len, void *user)
     payload_len = len - offsetof(weid_tlv_t, value);
 
     /* Fail closed on any wire/struct drift, and log the exact reason so a dropped
-     * datagram is never a silent mystery. */
+     * datagram is never a silent mystery. Order matters: the version and framing-
+     * length checks apply to every message type (the length check doubles as the
+     * truncation canary), then non-PERIODIC_STATS types are ignored cleanly BEFORE
+     * the stats_arg_t-specific element checks -- a REGISTER_STA/UNREGISTER_STA frame
+     * legitimately carries a MAC string (elem_size != sizeof(stats_arg_t)) and must
+     * be ignored, not mis-reported as a stats_arg_t layout drift. */
     if (tlv->version != LQ_IPC_WIRE_VERSION) {
         wei_util_error_print(WEI_CONNECTED,
             "%s:%d [IPC-RECV] REJECT version=%u (want %u)\n",
             __func__, __LINE__, tlv->version, (unsigned)LQ_IPC_WIRE_VERSION);
-        return;
-    }
-    if (tlv->elem_size != sizeof(stats_arg_t)) {
-        wei_util_error_print(WEI_CONNECTED,
-            "%s:%d [IPC-RECV] REJECT elem_size=%u want=%zu -- sender/daemon stats_arg_t drift\n",
-            __func__, __LINE__, tlv->elem_size, sizeof(stats_arg_t));
         return;
     }
     if (tlv->len != payload_len) {
@@ -108,16 +107,22 @@ static void weid_on_datagram(const uint8_t *buf, size_t len, void *user)
             __func__, __LINE__, tlv->len, payload_len);
         return;
     }
-    if (payload_len % sizeof(stats_arg_t) != 0) {
-        wei_util_error_print(WEI_CONNECTED,
-            "%s:%d [IPC-RECV] REJECT payload=%zu not a multiple of elem=%zu\n",
-            __func__, __LINE__, payload_len, sizeof(stats_arg_t));
-        return;
-    }
     if (tlv->type != LQ_IPC_MSG_PERIODIC_STATS) {
         wei_util_dbg_print(WEI_CONNECTED,
             "%s:%d [IPC-RECV] ignore type=%u (daemon scores PERIODIC_STATS=%u only)\n",
             __func__, __LINE__, tlv->type, (unsigned)LQ_IPC_MSG_PERIODIC_STATS);
+        return;
+    }
+    if (tlv->elem_size != sizeof(stats_arg_t)) {
+        wei_util_error_print(WEI_CONNECTED,
+            "%s:%d [IPC-RECV] REJECT elem_size=%u want=%zu -- sender/daemon stats_arg_t drift\n",
+            __func__, __LINE__, tlv->elem_size, sizeof(stats_arg_t));
+        return;
+    }
+    if (payload_len % sizeof(stats_arg_t) != 0) {
+        wei_util_error_print(WEI_CONNECTED,
+            "%s:%d [IPC-RECV] REJECT payload=%zu not a multiple of elem=%zu\n",
+            __func__, __LINE__, payload_len, sizeof(stats_arg_t));
         return;
     }
 
