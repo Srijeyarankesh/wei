@@ -37,10 +37,12 @@ extern "C" {
 /* Opaque module config-state holder; its layout lives in wei_connperf_dml.c. */
 typedef struct wei_connperf_dml_state wei_connperf_dml_state_t;
 
-/* Opens the bus handle and registers the connected-performance data-model
- * elements on it exactly once. Returns bus_error_success on registration (or
- * when already registered), and the failing bus_error_t otherwise. */
-bus_error_t wei_connperf_dml_register(void);
+/* Registers the connected-performance data-model elements on the daemon's shared
+ * bus handle exactly once. The handle MUST be the same one the report publish path
+ * fires through (weid_bus_handle), because rbus requires an event to be published
+ * on the very handle that registered it. Returns bus_error_success on registration
+ * (or when already registered), and the failing bus_error_t otherwise. */
+bus_error_t wei_connperf_dml_register(bus_handle_t *handle);
 
 #ifdef __cplusplus
 }

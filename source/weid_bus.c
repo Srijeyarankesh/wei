@@ -65,7 +65,7 @@ bus_error_t weid_bus_open(void)
     }
     g_weid_bus.opened = true;
 
-    rc = wei_connperf_dml_register();
+    rc = wei_connperf_dml_register(&g_weid_bus.handle);
     if (rc != bus_error_success) {
         wei_util_error_print(WEI_CONNECTED, "%s:%d bus: data-model registration failed, rc:%d\r\n",
             __func__, __LINE__, rc);

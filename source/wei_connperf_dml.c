@@ -28,7 +28,6 @@
 struct wei_connperf_dml_state {
     bool         registered;
     uint32_t     config_flags;
-    bus_handle_t handle;
 };
 
 static wei_connperf_dml_state_t g_wei_connperf_dml = {
@@ -127,13 +126,12 @@ bus_error_t wei_connperf_event_sub(char *event_name, bus_event_sub_action_t acti
     return bus_error_success;
 }
 
-/* Register-once entry: opens the unit's own bus component and registers the
- * three connected-performance elements (enable + config-flags properties and
- * the report/status event) on it. The event element is registered here only so
- * the publish lane has a target to fire through; this unit fires nothing. */
-bus_error_t wei_connperf_dml_register(void)
+/* Register-once entry: registers the three connected-performance elements (enable
+ * + config-flags properties and the report/status event) on the daemon's shared
+ * bus handle. The event element is registered here only so the publish lane has a
+ * target to fire through on that same handle; this unit fires nothing. */
+bus_error_t wei_connperf_dml_register(bus_handle_t *handle)
 {
-    char *component_name = "WifiConnPerf";
     uint32_t num_elements;
     bus_error_t rc;
 
@@ -149,26 +147,28 @@ bus_error_t wei_connperf_dml_register(void)
             ZERO_TABLE, { bus_data_type_bytes, false, 0, 0, 0, NULL } },
     };
 
+    if (handle == NULL) {
+        wei_util_error_print(WEI_CONNECTED, "%s:%d bus: NULL daemon handle\r\n",
+            __func__, __LINE__);
+        return bus_error_invalid_input;
+    }
+
     if (g_wei_connperf_dml.registered) {
         return bus_error_success;
     }
 
-    if (get_bus_descriptor() == NULL || get_bus_descriptor()->bus_open_fn == NULL) {
-        wei_util_error_print(WEI_CONNECTED, "%s:%d bus: descriptor or bus_open_fn is NULL\r\n",
-            __func__, __LINE__);
+    if (get_bus_descriptor() == NULL || get_bus_descriptor()->bus_reg_data_element_fn == NULL) {
+        wei_util_error_print(WEI_CONNECTED,
+            "%s:%d bus: descriptor or bus_reg_data_element_fn is NULL\r\n", __func__, __LINE__);
         return bus_error_general;
     }
 
-    rc = get_bus_descriptor()->bus_open_fn(&g_wei_connperf_dml.handle, component_name);
-    if (rc != bus_error_success) {
-        wei_util_error_print(WEI_CONNECTED, "%s:%d bus: bus_open_fn open failed for component:%s, rc:%d\r\n",
-            __func__, __LINE__, component_name, rc);
-        return rc;
-    }
-
+    /* Register on the daemon's single shared handle -- the same one the report
+     * publish path fires through (weid_bus_handle). rbusEvent_Publish requires the
+     * event element to live on the publishing handle, so registering here rather
+     * than on a separate component handle is what lets the report reach subscribers. */
     num_elements = (sizeof(data_elements) / sizeof(bus_data_element_t));
-    rc = get_bus_descriptor()->bus_reg_data_element_fn(&g_wei_connperf_dml.handle, data_elements,
-        num_elements);
+    rc = get_bus_descriptor()->bus_reg_data_element_fn(handle, data_elements, num_elements);
     if (rc != bus_error_success) {
         wei_util_error_print(WEI_CONNECTED, "%s:%d bus: bus_reg_data_element_fn failed, rc:%d\r\n",
             __func__, __LINE__, rc);
