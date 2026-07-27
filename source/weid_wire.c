@@ -60,7 +60,8 @@ static void weid_wire_map_record(const stats_arg_t *in, wei_conn_metric_record_t
     out->status = WEI_CONN_METRIC_STATUS_OK;
     out->link_snr_db = (int32_t)in->dev.cli_SNR;
     out->phy_rate_kbps = (uint32_t)in->dev.cli_LastDataUplinkRate * 1000u;
-    out->pkt_err_rate = (uint16_t)in->dev.cli_Retransmissions;
+    out->tx_frames = (uint32_t)in->dev.cli_PacketsSent;
+    out->tx_err_frames = (uint32_t)in->dev.cli_ErrorsSent;
     out->chan_util_pct = (uint8_t)(in->channel_utilization < 0 ? 0 :
             (in->channel_utilization > 100 ? 100 : in->channel_utilization));
 }
@@ -141,10 +142,10 @@ static void weid_on_datagram(const uint8_t *buf, size_t len, void *user)
         m = (const uint8_t *)entry.dev.cli_MACAddress;
         wei_util_dbg_print(WEI_CONNECTED,
             "%s:%d [IPC-RECV]  entry[%zu] mac=%02x:%02x:%02x:%02x:%02x:%02x "
-            "snr=%d phy_kbps=%u pkt_err=%u chan_util=%u active=%d\n",
+            "snr=%d phy_kbps=%u frames=%u errs=%u chan_util=%u active=%d\n",
             __func__, __LINE__, i, m[0], m[1], m[2], m[3], m[4], m[5],
-            rec.link_snr_db, rec.phy_rate_kbps, (unsigned)rec.pkt_err_rate,
-            (unsigned)rec.chan_util_pct, (int)rec.activity_state);
+            rec.link_snr_db, rec.phy_rate_kbps, (unsigned)rec.tx_frames,
+            (unsigned)rec.tx_err_frames, (unsigned)rec.chan_util_pct, (int)rec.activity_state);
         wei_infer_stage_record(ctx->engine, entry.dev.cli_MACAddress, &rec);
     }
 }

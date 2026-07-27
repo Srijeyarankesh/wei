@@ -31,7 +31,7 @@ extern "C" {
 
 /* Bumped on any change to the record layout so C6 (sender) and C3 (receiver)
  * can reject a shape they do not recognise. Fronts every record. */
-#define WEI_CONN_METRIC_VERSION 2u
+#define WEI_CONN_METRIC_VERSION 3u
 
 /* The record's leading field is a single version byte, first in wire order. */
 typedef uint8_t wei_conn_metric_ver_t;
@@ -75,7 +75,8 @@ typedef struct {
     wei_conn_metric_status_t status;
     int32_t                  link_snr_db;
     uint32_t                 phy_rate_kbps;
-    uint16_t                 pkt_err_rate;   /* PER slot; sourcing TBD in C6 (gate Q3) */
+    uint32_t                 tx_frames;      /* cumulative frames sent to this client: windowed-loss denominator base */
+    uint32_t                 tx_err_frames;  /* cumulative send-error frames to this client: windowed-loss numerator base */
     uint8_t                  chan_util_pct;  /* channel utilization %, 0-100; C5 sigmoid de-weight input */
 } wei_conn_metric_record_t;
 

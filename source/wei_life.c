@@ -289,7 +289,7 @@ static int wei_life_eval_loss(wei_life_ctx_t *ctx, const wei_conn_metric_record_
 {
     wei_track_record_t rec;
 
-    wei_track_tick(&ctx->loss_track, -(int32_t)m->pkt_err_rate, now_ms,
+    wei_track_tick(&ctx->loss_track, -(int32_t)m->tx_err_frames, now_ms,
         -policy->loss_ceiling, policy->loss_dwell_ms);
     wei_track_collect(&ctx->loss_track, &rec);
     if (rec.count == 0 && rec.duration_ms == 0) {

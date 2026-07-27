@@ -66,13 +66,15 @@ typedef struct {
 
 /* One per-client inference result emitted per tick: the standardised 0-100
  * connected-P score, its serviceable-state verdict, the reserved TP-4 dominant-
- * contributor tag, and the reserved BUF-1 video-degrade label. Value-only
- * output; all RBus/accessor/publish egress is owned downstream. */
+ * contributor tag, the reserved BUF-1 video-degrade label, and the windowed
+ * packet-error percentage carried for the report. Value-only output; all
+ * RBus/accessor/publish egress is owned downstream. */
 typedef struct {
     uint8_t                 score;
     wei_infer_verdict_t     verdict;
     wei_infer_contributor_t dominant;
     uint8_t                 video_degrade;
+    uint8_t                 pkt_err_pct;    /* windowed packet-error rate %, surfaced in the report */
 } wei_infer_result_t;
 
 /* Normalised score metrics carrying a running per-client band, in slot order:
@@ -81,9 +83,11 @@ typedef struct {
  * counted here. */
 #define WEI_INFER_METRIC_COUNT 3
 
-/* Depth of the packet-error sliding window and the smoothed uplink-PHY history
- * window kept per client for the throughput-instability measure (TP-3). */
-#define WEI_INFER_PER_WINDOW 8
+/* Depth of the packet-error counter-sample window (cumulative tx/err frame
+ * pairs, differenced across the window to yield an interval loss rate) and of
+ * the smoothed uplink-PHY history window kept per client for the throughput-
+ * instability measure (TP-3). */
+#define WEI_INFER_PERR_WINDOW 8
 #define WEI_INFER_PHY_WINDOW 8
 
 /* Running observed [lo,hi] domain for one normalised metric, widened per client
@@ -105,9 +109,10 @@ typedef struct {
 typedef struct {
     wei_infer_band_t norm_band[WEI_INFER_METRIC_COUNT];
 
-    uint16_t per_window[WEI_INFER_PER_WINDOW];
-    uint8_t  per_head;
-    uint8_t  per_fill;
+    uint32_t perr_frames[WEI_INFER_PERR_WINDOW];   /* ring of cumulative tx-frame counters */
+    uint32_t perr_errs[WEI_INFER_PERR_WINDOW];     /* ring of cumulative tx-error counters */
+    uint8_t  perr_head;
+    uint8_t  perr_fill;
 
     uint32_t phy_window[WEI_INFER_PHY_WINDOW];
     uint8_t  phy_head;

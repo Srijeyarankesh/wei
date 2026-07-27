@@ -20,6 +20,7 @@
 #include "wei_perfreport.h"
 #include "wei_util.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -84,12 +85,13 @@ static void wei_infer_map_reap(wei_infer_engine_t *eng, int64_t now_ms)
 
 /* Pushes this tick's raw packet-error and uplink-PHY samples into their ring
  * windows, advancing head and saturating fill; O(1), no allocation. */
-static void wei_infer_per_push(wei_infer_client_t *st, uint16_t v)
+static void wei_infer_perr_push(wei_infer_client_t *st, uint32_t frames, uint32_t errs)
 {
-    st->per_window[st->per_head] = v;
-    st->per_head = (uint8_t)((st->per_head + 1u) % WEI_INFER_PER_WINDOW);
-    if (st->per_fill < WEI_INFER_PER_WINDOW) {
-        st->per_fill++;
+    st->perr_frames[st->perr_head] = frames;
+    st->perr_errs[st->perr_head] = errs;
+    st->perr_head = (uint8_t)((st->perr_head + 1u) % WEI_INFER_PERR_WINDOW);
+    if (st->perr_fill < WEI_INFER_PERR_WINDOW) {
+        st->perr_fill++;
     }
 }
 
@@ -102,15 +104,31 @@ static void wei_infer_phy_push(wei_infer_client_t *st, uint32_t v)
     }
 }
 
-static double wei_infer_per_mean(const wei_infer_client_t *st)
+/* Interval packet-error rate as a percentage, differenced across the counter
+ * window: (errs_new - errs_old) / ((frames_new - frames_old) + (errs_new -
+ * errs_old)) * 100, oldest-vs-newest cumulative samples. Needs two samples to
+ * form a delta; a counter reset (newest < oldest) or an idle interval with no
+ * new frames yields 0.0. O(1), no allocation. */
+static double wei_infer_perr_rate(const wei_infer_client_t *st)
 {
-    uint32_t sum = 0;
-    uint8_t i;
+    uint8_t newest, oldest;
+    uint32_t d_frames, d_errs;
 
-    for (i = 0; i < st->per_fill; i++) {
-        sum += st->per_window[i];
+    if (st->perr_fill < 2u) {
+        return 0.0;
     }
-    return st->per_fill ? (double)sum / (double)st->per_fill : 0.0;
+    newest = (uint8_t)((st->perr_head + WEI_INFER_PERR_WINDOW - 1u) % WEI_INFER_PERR_WINDOW);
+    oldest = (st->perr_fill < WEI_INFER_PERR_WINDOW) ? 0u : st->perr_head;
+
+    d_frames = (st->perr_frames[newest] >= st->perr_frames[oldest]) ?
+        (st->perr_frames[newest] - st->perr_frames[oldest]) : 0u;
+    d_errs = (st->perr_errs[newest] >= st->perr_errs[oldest]) ?
+        (st->perr_errs[newest] - st->perr_errs[oldest]) : 0u;
+
+    if (d_frames + d_errs == 0u) {
+        return 0.0;
+    }
+    return (double)d_errs / (double)(d_frames + d_errs) * 100.0;
 }
 
 static double wei_infer_phy_mean(const wei_infer_client_t *st)
@@ -191,8 +209,9 @@ static int wei_infer_score_client(wei_infer_client_t *st,
     const wei_conn_metric_record_t *rec, wei_infer_result_t *out)
 {
     double norm[WEI_INFER_METRIC_COUNT];
+    double contrib[WEI_INFER_METRIC_COUNT];
     double smoothed_phy;
-    double smoothed_per;
+    double per_pct;
     double reduced;
     double weighted;
     double score;
@@ -210,23 +229,30 @@ static int wei_infer_score_client(wei_infer_client_t *st,
     warming = (st->phy_fill == 0);
 
     wei_infer_phy_push(st, rec->phy_rate_kbps);
-    wei_infer_per_push(st, rec->pkt_err_rate);
+    wei_infer_perr_push(st, rec->tx_frames, rec->tx_err_frames);
     smoothed_phy = wei_infer_phy_mean(st);
-    smoothed_per = wei_infer_per_mean(st);
+    per_pct = wei_infer_perr_rate(st);   /* interval loss %, differenced over the window */
 
     wei_infer_band_widen(&st->norm_band[0], (double)rec->link_snr_db);
     wei_infer_band_widen(&st->norm_band[1], smoothed_phy);
-    wei_infer_band_widen(&st->norm_band[2], smoothed_per);
+    wei_infer_band_widen(&st->norm_band[2], per_pct);
 
-    norm[0] =  cscore_normalize_metric((double)rec->link_snr_db,
-                                       st->norm_band[0].lo, st->norm_band[0].hi);
-    norm[1] =  cscore_normalize_metric(smoothed_phy,
-                                       st->norm_band[1].lo, st->norm_band[1].hi);
-    norm[2] = -cscore_normalize_metric(smoothed_per,
-                                       st->norm_band[2].lo, st->norm_band[2].hi);
+    norm[0] = cscore_normalize_metric((double)rec->link_snr_db,
+                                      st->norm_band[0].lo, st->norm_band[0].hi);
+    norm[1] = cscore_normalize_metric(smoothed_phy,
+                                      st->norm_band[1].lo, st->norm_band[1].hi);
+    norm[2] = cscore_normalize_metric(per_pct,
+                                      st->norm_band[2].lo, st->norm_band[2].hi);
 
-    reduced  = cscore_rms_reduce(norm, WEI_INFER_METRIC_COUNT);
-    weighted = cscore_chanutil_weight(reduced, (double)rec->chan_util_pct / 100.0);
+    /* Reward metrics (SNR, PHY) contribute norm^2; the loss penalty contributes
+     * 1 - norm^2 so a clean link still adds to the aggregate and a lossy one
+     * merely adds less -- the pre-weight figure never goes negative. */
+    contrib[0] = norm[0] * norm[0];
+    contrib[1] = norm[1] * norm[1];
+    contrib[2] = 1.0 - (norm[2] * norm[2]);
+
+    reduced  = cscore_rms_reduce(contrib, WEI_INFER_METRIC_COUNT);
+    weighted = cscore_chanutil_weight(reduced, (double)rec->chan_util_pct);
     score    = cscore_standardize(weighted);
     raw_score = score;
 
@@ -234,8 +260,14 @@ static int wei_infer_score_client(wei_infer_client_t *st,
         st->reconnect_ramp = WEI_INFER_RECONNECT_RAMP;
     }
     if (st->reconnect_ramp > 0) {
-        score = score * (double)(WEI_INFER_RECONNECT_RAMP - st->reconnect_ramp + 1u) /
-                (double)WEI_INFER_RECONNECT_RAMP;
+        /* Exponential ease-in recovery: as the ramp counts down, progress runs
+         * 0->1 and the applied fraction follows (1-e^(-4p))/(1-e^-4), so a freshly
+         * reconnected client's score climbs back steeply-then-smoothly rather than
+         * in equal linear steps. */
+        double progress = (double)(WEI_INFER_RECONNECT_RAMP - st->reconnect_ramp + 1u) /
+                          (double)WEI_INFER_RECONNECT_RAMP;
+        double ease = (1.0 - exp(-4.0 * progress)) / (1.0 - exp(-4.0));
+        score = score * ease;
         st->reconnect_ramp--;
     }
 
@@ -243,16 +275,19 @@ static int wei_infer_score_client(wei_infer_client_t *st,
     out->verdict = WEI_INFER_VERDICT_SMOOTH;
     out->dominant = WEI_INFER_CONTRIB_NONE;
     out->video_degrade = 0;
+    out->pkt_err_pct = (uint8_t)(per_pct <= 0.0 ? 0 : (per_pct >= 100.0 ? 100 : lround(per_pct)));
 
     wei_util_info_print(WEI_CONNECTED,
-        "%s:%d [SCORE-CLIENT] in{snr=%d phy_kbps=%u per=%u chan=%u} smoothed{phy=%.0f per=%.2f} "
-        "bands{snr[%.1f,%.1f] phy[%.0f,%.0f] per[%.2f,%.2f]} norm{%.3f %.3f %.3f} "
-        "reduced=%.4f weighted=%.4f raw=%.2f ramp_left=%u -> score=%u\n",
+        "%s:%d [SCORE-CLIENT] in{snr=%d phy_kbps=%u frames=%u errs=%u chan=%u} "
+        "smoothed{phy=%.0f} per_pct=%.2f bands{snr[%.1f,%.1f] phy[%.0f,%.0f] per[%.2f,%.2f]} "
+        "norm{%.3f %.3f %.3f} contrib{%.3f %.3f %.3f} reduced=%.4f weighted=%.4f raw=%.2f "
+        "ramp_left=%u -> score=%u\n",
         __func__, __LINE__, rec->link_snr_db, rec->phy_rate_kbps,
-        (unsigned)rec->pkt_err_rate, (unsigned)rec->chan_util_pct,
-        smoothed_phy, smoothed_per,
+        (unsigned)rec->tx_frames, (unsigned)rec->tx_err_frames, (unsigned)rec->chan_util_pct,
+        smoothed_phy, per_pct,
         st->norm_band[0].lo, st->norm_band[0].hi, st->norm_band[1].lo, st->norm_band[1].hi,
         st->norm_band[2].lo, st->norm_band[2].hi, norm[0], norm[1], norm[2],
+        contrib[0], contrib[1], contrib[2],
         reduced, weighted, raw_score, (unsigned)st->reconnect_ramp, (unsigned)out->score);
     return 1;
 }
@@ -368,7 +403,7 @@ static wei_infer_contributor_t wei_infer_attribute(const wei_infer_client_t *st,
                                                st->norm_band[0].lo, st->norm_band[0].hi);
     badness[1] = 1.0 - cscore_normalize_metric((double)rec->phy_rate_kbps,
                                                st->norm_band[1].lo, st->norm_band[1].hi);
-    badness[2] = cscore_normalize_metric((double)rec->pkt_err_rate,
+    badness[2] = cscore_normalize_metric(wei_infer_perr_rate(st),
                                          st->norm_band[2].lo, st->norm_band[2].hi);
     badness[3] = (double)rec->chan_util_pct / 100.0;
 

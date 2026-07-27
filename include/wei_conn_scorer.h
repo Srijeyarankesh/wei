@@ -36,8 +36,8 @@ extern "C" {
 /* Public per-client kernel entry: reduces one C1 connected-P metric record to a
  * single standardised 0-100 score (higher = better). Gates on activity/status --
  * a non-active or non-OK record is suppressed and returns 0 -- then runs the
- * fixed pipeline normalise -> signed-square RMS -> channel-utilisation sigmoid
- * weight -> standardise. Pure and re-entrant over its one const record: it
+ * fixed pipeline normalise -> quadratic-contribution RMS -> channel-utilisation
+ * sigmoid weight -> standardise. Pure and re-entrant over its one const record: it
  * mutates nothing and owns no state, and is called once per connected client
  * by the C4 sweep. */
 uint8_t wei_conn_scorer_score(const wei_conn_metric_record_t *record);
@@ -48,12 +48,13 @@ uint8_t wei_conn_scorer_score(const wei_conn_metric_record_t *record);
  * metric's [lo,hi] domain; a non-positive span yields 0.0. No allocation, no lock. */
 double cscore_normalize_metric(double value, double lo, double hi);
 
-/* Reduces the normalised link-metric vector to one bounded intermediate scalar via
- * signed-square RMS -- sqrt(mean(±metric²)), each element's sign carrying its metric
- * direction so a penalising metric (arriving negative) subtracts. A net-negative mean
- * or an empty vector yields 0.0. The single reduction bound by name by CH-1 and CP-6,
- * not one per score variant. No allocation, no lock. */
-double cscore_rms_reduce(const double *metrics, size_t count);
+/* Reduces a vector of per-metric quadratic contributions to one bounded intermediate
+ * scalar via sqrt(mean(contribution)). Each caller-supplied contribution already lies
+ * in [0,1]: a reward metric contributes norm^2 and a penalty metric contributes
+ * 1 - norm^2, so a lossy link lowers the aggregate without ever subtracting it below
+ * zero. A net-negative mean or an empty vector yields 0.0. The single reduction bound
+ * by name by CH-1 and CP-6, not one per score variant. No allocation, no lock. */
+double cscore_rms_reduce(const double *contributions, size_t count);
 
 /* Weights the RMS-reduced scalar by a logistic function of channel utilisation --
  * reduced × sigmoid(LINK_QTY_B0 + LINK_QTY_B1·chan_util) -- applied before the

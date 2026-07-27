@@ -191,7 +191,7 @@ static const char *wei_perfreport_build_json(const uint8_t client_mac[6],
     cJSON_AddStringToObject(doc, "dominant", wei_perfreport_contributor_name(result->dominant));
     cJSON_AddNumberToObject(doc, "snr_db", metrics->link_snr_db);
     cJSON_AddNumberToObject(doc, "phy_rate_kbps", metrics->phy_rate_kbps);
-    cJSON_AddNumberToObject(doc, "pkt_err_rate", metrics->pkt_err_rate);
+    cJSON_AddNumberToObject(doc, "pkt_err_pct", result->pkt_err_pct);
     cJSON_AddNumberToObject(doc, "chan_util_pct", metrics->chan_util_pct);
     cJSON_AddNumberToObject(doc, "activity_state", metrics->activity_state);
     cJSON_AddNumberToObject(doc, "status", metrics->status);

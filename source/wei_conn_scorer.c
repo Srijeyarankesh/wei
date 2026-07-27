@@ -53,18 +53,22 @@ double cscore_normalize_metric(double value, double lo, double hi)
     return unit;
 }
 
-double cscore_rms_reduce(const double *metrics, size_t count)
+double cscore_rms_reduce(const double *contributions, size_t count)
 {
     double accum = 0.0;
     size_t i;
 
-    if (metrics == NULL || count == 0) {
+    if (contributions == NULL || count == 0) {
         return 0.0;
     }
 
+    /* Each entry is already a per-metric quadratic contribution in [0,1]: a
+     * reward metric contributes norm^2 (higher is better) and a penalty metric
+     * contributes 1 - norm^2 (a clean link still adds, a lossy one merely adds
+     * less). The aggregate is the root of their mean, so no single metric can
+     * ever pull the pre-weight figure below zero. */
     for (i = 0; i < count; i++) {
-        double m = metrics[i];
-        accum += copysign(m * m, m); /* signed square: penalising metrics subtract */
+        accum += contributions[i];
     }
 
     accum /= (double)count;
@@ -123,6 +127,8 @@ double cscore_standardize(double weighted)
 uint8_t wei_conn_scorer_score(const wei_conn_metric_record_t *record)
 {
     double norm[3];
+    double contrib[3];
+    double per_pct;
     double reduced;
     double weighted;
     uint8_t out;
@@ -136,20 +142,31 @@ uint8_t wei_conn_scorer_score(const wei_conn_metric_record_t *record)
         return 0;
     }
 
-    norm[0] =  cscore_normalize_metric((double)record->link_snr_db,   0.0,      40.0);
-    norm[1] =  cscore_normalize_metric((double)record->phy_rate_kbps, 0.0, 866000.0);
-    /* PER is a penalty: it enters negative so the signed-square RMS subtracts it. */
-    norm[2] = -cscore_normalize_metric((double)record->pkt_err_rate,  0.0,       1.0);
+    /* Stateless kernel: derive an instantaneous loss percent straight from the
+     * cumulative counters (the windowed variant lives in the sweep engine). */
+    per_pct = (record->tx_frames + record->tx_err_frames) ?
+        (double)record->tx_err_frames /
+        (double)(record->tx_frames + record->tx_err_frames) * 100.0 : 0.0;
 
-    reduced  = cscore_rms_reduce(norm, 3);
+    norm[0] = cscore_normalize_metric((double)record->link_snr_db,   0.0,      40.0);
+    norm[1] = cscore_normalize_metric((double)record->phy_rate_kbps, 0.0, 866000.0);
+    norm[2] = cscore_normalize_metric(per_pct,                       0.0,     100.0);
+
+    /* Reward metrics score by norm^2; the loss penalty scores by 1 - norm^2. */
+    contrib[0] = norm[0] * norm[0];
+    contrib[1] = norm[1] * norm[1];
+    contrib[2] = 1.0 - (norm[2] * norm[2]);
+
+    reduced  = cscore_rms_reduce(contrib, 3);
     weighted = cscore_chanutil_weight(reduced, (double)record->chan_util_pct);
     out = (uint8_t)lround(cscore_standardize(weighted));
 
     wei_util_info_print(WEI_CONNECTED,
-        "%s:%d [C5-score] snr=%d phy_kbps=%u per=%u chan=%u | norm{%.3f %.3f %.3f} "
-        "reduced=%.4f weighted=%.4f -> score=%u\n",
+        "%s:%d [C5-score] snr=%d phy_kbps=%u per_pct=%.1f chan=%u | norm{%.3f %.3f %.3f} "
+        "contrib{%.3f %.3f %.3f} reduced=%.4f weighted=%.4f -> score=%u\n",
         __func__, __LINE__, record->link_snr_db, record->phy_rate_kbps,
-        (unsigned)record->pkt_err_rate, (unsigned)record->chan_util_pct,
-        norm[0], norm[1], norm[2], reduced, weighted, (unsigned)out);
+        per_pct, (unsigned)record->chan_util_pct,
+        norm[0], norm[1], norm[2], contrib[0], contrib[1], contrib[2],
+        reduced, weighted, (unsigned)out);
     return out;
 }
